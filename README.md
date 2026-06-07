@@ -211,13 +211,38 @@ OS调度器看到这个新线程，在合适的时机把它分配到某个CPU核
 
 在Linux上，`std::thread` -> `pthread_create()` -> `clone()`系统调用，本质就是创建一个共享空间的轻量级进程。
 
+## try_lock_for VS try_lock_until
 
+这两个函数都属于std::timed_mutex，功能相似但参数语义不同。
 
+### try_lock_for - 等待一段时长
 
+```c++
+m.try_lock_for(std::chrono::seconds(1));
+```
 
+- 参数是相对时间（duration）：从调用那一刻起，最多等待多久
+- 内部等价于：`try_lock_until(now()+duration)`
+- 语义：我愿意等1秒
 
+### try_lock_until - 等待到某个时间点
 
+```c++
+auto now = std::chrono::steady_clock::now();
+m.try_lock_until(now + std::chrono::seconds(1));
+```
 
+- 参数是绝对时间点（time_point）：等到哪个时刻为止
+- 你需要自己计算截止时间，灵活性更高
+- 语义：我等到now+1秒这个时刻
+
+### 总结
+
+| 对比项  | try_lock_for | try_lock_until               |
+|------|--------------|------------------------------|
+| 参数类型 | duration（时长） | time_point（时间点）              |
+| 参数示例 | seconds(1)   | now() + seconds(1)           |
+| 使用场景 | 只关心等待多久      | 需要精确截止时间（如多步操作共享同一个deadline） |
 
 
 
