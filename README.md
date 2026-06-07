@@ -130,6 +130,17 @@ int main()
 把子线程从`std::thread`对象上分离，让它变成一个后台线程（`daemon thread`），自己跑完自己消亡，主线程不管它。换句话说，
 `detach()`就是切断C++对象对OS线程的持有，OS线程继续跑，C++对象变成空壳。
 
+具体来说是：
+
+- `std::thread::detach()`内部调用了`pthread_detach()`，在OS线程上打上一个标记，表示这个线程结束后资源自动回收，需要人来join。
+    - 所谓打上标记，就是把`detach_state`从`JOINABLE`改成`DETACHED`。线程结束时，OS检查这个字段。
+        - `JOINABLE`：保留资源，等待有人`pthread_join`
+        - `DETACHED`：直接回收资源
+    - TCB里有一个字段记录线程的分离状态
+        - `detach_state = PTHREAD_CREATE_JOINABLE`
+        - `detach_state = PTHREAD_CREATE_DETACHED`
+- 清空`std::thread`对象，即解除绑定。
+
 ### 资源回收角度
 
 #### join
