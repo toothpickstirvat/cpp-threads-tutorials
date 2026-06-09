@@ -9,26 +9,20 @@ typedef unsigned long long ull;
 ull OddSum = 0;
 ull EvenSum = 0;
 
-void findEven(const ull start, const ull end)
-{
+void findEven(const ull start, const ull end) {
     ull sum = 0;
-    for (ull i = start; i <= end; ++i)
-    {
-        if ((i & 1) == 0)
-        {
+    for (ull i = start; i <= end; ++i) {
+        if ((i & 1) == 0) {
             sum += i;
         }
     }
     EvenSum = sum;
 }
 
-void findOdd(const ull start, const ull end)
-{
+void findOdd(const ull start, const ull end) {
     ull sum = 0;
-    for (ull i = start; i <= end; ++i)
-    {
-        if ((i & 1) == 1)
-        {
+    for (ull i = start; i <= end; ++i) {
+        if ((i & 1) == 1) {
             sum += i;
         }
     }
@@ -36,8 +30,7 @@ void findOdd(const ull start, const ull end)
 }
 
 
-int main()
-{
+int main() {
     constexpr ull start = 0;
     constexpr ull end = 1900000000;
     const auto startTime = high_resolution_clock::now();

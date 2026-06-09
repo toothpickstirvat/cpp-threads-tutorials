@@ -16,31 +16,24 @@ typedef unsigned long long ull;
 ull OddSum = 0;
 ull EvenSum = 0;
 
-void findEven(const ull start, const ull end)
-{
-    for (ull i = start; i <= end; ++i)
-    {
-        if ((i & 1) == 0)
-        {
+void findEven(const ull start, const ull end) {
+    for (ull i = start; i <= end; ++i) {
+        if ((i & 1) == 0) {
             OddSum += i;
         }
     }
 }
 
-void findOdd(const ull start, const ull end)
-{
-    for (ull i = start; i <= end; ++i)
-    {
-        if ((i & 1) == 1)
-        {
+void findOdd(const ull start, const ull end) {
+    for (ull i = start; i <= end; ++i) {
+        if ((i & 1) == 1) {
             EvenSum += i;
         }
     }
 }
 
 
-int main()
-{
+int main() {
     constexpr ull start = 0;
     constexpr ull end = 1900000000;
     const auto startTime = high_resolution_clock::now();
@@ -83,26 +76,20 @@ int main()
     ```
 * 使用局部变量
     ```c++
-    void findEven(const ull start, const ull end)
-    {
+    void findEven(const ull start, const ull end) {
         ull sum = 0; // 栈上的局部变量，每个线程独立
-        for (ull i = start; i <= end; ++i)
-        {
-            if ((i & 1) == 0)
-            {
+        for (ull i = start; i <= end; ++i) {
+            if ((i & 1) == 0) {
                 sum += i;
             }
         }
         OddSum = sum; // 整个循环只写一次全局变量
     }
     
-    void findOdd(const ull start, const ull end)
-    {
+    void findOdd(const ull start, const ull end) {
         ull sum = 0;
-        for (ull i = start; i <= end; ++i)
-        {
-            if ((i & 1) == 1)
-            {
+        for (ull i = start; i <= end; ++i) {
+            if ((i & 1) == 1) {
                 sum += i;
             }
         }
