@@ -244,6 +244,162 @@ m.try_lock_until(now + std::chrono::seconds(1));
 | 参数示例 | seconds(1)   | now() + seconds(1)           |
 | 使用场景 | 只关心等待多久      | 需要精确截止时间（如多步操作共享同一个deadline） |
 
+## std::recursive_mutex
+
+### 背景
+
+普通`std::mutex`有一个硬性约束：同一个线程不能对它lock两次，第二次lock会造成死锁。但现实中有一类很自然的场景：递归函数或函数A调用函数B，两者都需要加锁，而且调用方已经持有锁。
+
+```c++
+// 用普通mutex会死锁
+void funA() {
+    m.lock();
+    funcB(); // funcB也要lock m，死锁
+    m.unlock();
+}
+
+void funcB() {
+    m.lock(); // 同一线程再次lock，卡死
+    // ...
+    m.unlock();
+}
+```
+
+`recursive_mutex`就是为了解决这个问题而生的：同一线程可以多次`lock`，内部维护一个计数器，`lock`几次就要`unlock`几次才真正释放。
+
+### 使用场景
+
+- 递归函数内部需要保护共享数据
+- 同一线程内多个函数相互调用且都要加锁（但通常这是代码设计问题，能重构则重构）
+
+### 注意
+
+`recursive_mutex`比普通`mutex`开销更大（需要维护所有权和技术），不要随手替代普通`mutex`。
+
+## std::lock_guard
+
+### 背景
+
+手动`lock/unlock`有个经典问题：如果中间抛异常，`unlock`永远不会被调用，锁泄漏，其他线程永远阻塞。
+
+```c++
+// 危险写法
+m.lock();
+doSomething(); // 如果这里抛异常，unlock不执行，死锁
+m.unlock();
+```
+
+这是RAII（Resource Acquisition Is Initialization）思想的典型应用场景。`lock_guard`在构造时加锁，析构时自动解锁，无论函数正常推出还是异常退出，析构函数必定执行。
+
+```c++
+void task(const char* threadNumber, int loopFor) {
+    std::lock_guard<mutex> lock(m1);  // 构造，m1.lock()
+    for (int i = 0; i < loopFor; ++i) {
+        buffer++;
+        cout << threadNumber << buffer << endl;
+    }
+}   // 函数退出，lock析构，m1.unlock()自动调用
+```
+
+### 使用场景
+
+- 绝大多数简单加锁场景：进入作用域加锁，离开作用域解锁
+- 只需要“锁住整个代码块”的情况
+
+### 局限
+
+`lock_guard`及其简单，没有任何灵活性：
+
+- 不能中途手动`unlock`
+- 不能延迟加锁
+- 不能转移所有权
+
+## std::unique_lock
+
+### 背景
+
+`lock_guard`够用，但不够灵活。`unique_lock`是`lock_guard`
+的功能超集，在保留RAII自动解锁的同时，增加了大量控制能力。它的出现是为了满足条件变量（`condition_variable`）、延迟加锁、超时加锁等高级场景。
+
+```c++
+std::unique_lock<mutex> lock(m); // 等价于lock_guard，构造时加锁
+
+std::unique_lock<mutex> lock(m, std::defer_lock); // 构造时不加锁
+lock.lock(); // 手动决定何时加锁
+```
+
+`std::defer_lock`是一个tag，告诉`unique_lock`先别加锁，我晚点手动锁。
+
+### 使用场景
+
+```c++
+std::condition_variable cv;
+std::unique_lock<mutex> lock(m);
+cv.wait(lock, []{return ready;});
+// wait内部需要能unlock（等待时释放锁）再lock（被唤醒后再重新获取）
+// lock_guard做不到这一点
+```
+
+## 锁的“所有权”
+
+本质就是：“谁负责unlock这把锁？”
+
+### 从底层看
+
+`mutex`本身只是一个状态机：
+
+- `locked`：某人持有它
+- `unlocked`：没人持有
+
+它不记录“谁”锁了它（除了`recursive_mutex`需要记录线程ID）。`lock()`就是抢占，`unlock()`就是释放，仅此而已。
+所有权是建立在`mutex`之上的软件层约定：由某个对象来独占地承担调用`unlock()`的职责。
+
+### lock_guard VS unique_lock的区别就在这里
+
+`lock_guard`的所有权是绑死的：
+
+```c++
+// 绑死：lock_guard活着，锁就不会释放;lock_guard死了，锁就释放
+// 没有任何方式吧这个职责转交给别人
+std::lock_guard<mutex> lock(m);
+```
+
+`unique_lock`的所有权是可转移的：
+
+```c++
+std::unique_lock<mutex> lock1(m); // lock1拥有锁
+std::unique_lock<mutex> lock2 = std::move(lock1);
+// 现在lock2拥有锁，lock1什么都没有
+// 析构时，lock2负责unlock，lock1什么都不做
+```
+
+`move`之后，`lock1.owns_lock()`返回`false`，`lock2.own_lock()`返回`true`。“谁负责unlock”这个职责被转移了。
+
+### defer_lock也是所有权的体现
+
+```c++
+std::unique_lock<mutex> lock(m, std::defer_lock);
+// lock对象存在，但owns_lock() == false
+// 此时lock不拥有m，析构时不会unlock
+
+lock.lock(); // 现在owns_lock()==true，析构时会unlock
+```
+
+`unique_lock`内部就是维护了一个`bool owned`标志，析构函数检查这个标志再决定要不要`unlock`。
+
+### 总结
+
+所有权=析构时是否有义务调用`unlock()`。
+
+- `lock_guard`这个义务不可转移
+- `unique_lock`这个义务可以通过`move`转交给另一个对象
+
+
+
+
+
+
+
 
 
 
