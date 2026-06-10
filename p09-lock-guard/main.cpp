@@ -7,7 +7,7 @@ using namespace std;
 std::mutex m1;
 int buffer = 0;
 
-// void task(const char* threadNumber, int loopFor) {
+// void task(const char* threadNumber, const int loopFor) {
 //     m1.lock();
 //     for (int i = 0; i < loopFor; ++i) {
 //         buffer++;
@@ -16,7 +16,7 @@ int buffer = 0;
 //     m1.unlock();
 // }
 
-void task(const char* threadNumber, int loopFor) {
+void task(const char* threadNumber, const int loopFor) {
     std::lock_guard<mutex> lock(m1);
     for (int i = 0; i < loopFor; ++i) {
         buffer++;

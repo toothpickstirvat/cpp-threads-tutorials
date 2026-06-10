@@ -8,14 +8,14 @@ std::condition_variable cv;
 std::mutex m;
 long balance = 0;
 
-void addMoney(int money) {
+void addMoney(const int money) {
     std::lock_guard<mutex> lg(m);
     balance += money;
     cout << "Amount added current balance: " << balance << endl;
     cv.notify_one();
 }
 
-void withdrawMoney(int money) {
+void withdrawMoney(const int money) {
     std::unique_lock<mutex> ul(m); // 加锁
     cv.wait(ul, []{ return balance != 0; }); // 等待，如果条件不成立，释放锁
     if (balance >= money) {

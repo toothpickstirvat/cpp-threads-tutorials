@@ -7,7 +7,7 @@ using namespace std;
 using namespace std::chrono;
 typedef unsigned long long ull;
 
-void findOdd(std::promise<ull>&& oddSumPromise, ull start, ull end) {
+void findOdd(std::promise<ull>&& oddSumPromise, const ull start, const ull end) {
     ull oddSum = 0;
     for (ull i = start; i <= end; ++i) {
         if (i & 1) {

@@ -28,7 +28,7 @@ std::mutex m1, m2;
 
 
 void taskA() {
-    while (1) {
+    while (true) {
         std::lock(m1, m2);
         cout << "task a\n";
         m1.unlock();
@@ -37,7 +37,7 @@ void taskA() {
 }
 
 void taskB() {
-    while (1) {
+    while (true) {
         std::lock(m2, m1);
         cout << "task b\n";
         m2.unlock();

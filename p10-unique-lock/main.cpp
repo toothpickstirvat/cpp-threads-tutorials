@@ -7,7 +7,7 @@ std::mutex m1;
 int buffer = 0;
 
 // example 1
-// void task(const char* threadNumber, int loopFor) {
+// void task(const char* threadNumber, const int loopFor) {
 //     std::unique_lock<mutex> lock(m1); // 自动调用m1.lock()
 //     for (int i = 0; i < loopFor; i++) {
 //         buffer++;
@@ -27,7 +27,7 @@ int buffer = 0;
 
 
 // example 2
-void task(const char* threadNumber, int loopFor) {
+void task(const char* threadNumber, const int loopFor) {
     std::unique_lock<mutex> lock(m1, std::defer_lock); // 不会调用m1.lock()
     lock.lock();
     for (int i = 0; i < loopFor; ++i) {

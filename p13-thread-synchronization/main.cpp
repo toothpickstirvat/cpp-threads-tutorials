@@ -6,7 +6,7 @@ using namespace std;
 long long balance = 0;
 std::mutex m;
 
-void addMoney(long long val) {
+void addMoney(const long long val) {
     m.lock();
     balance += val;
     m.unlock();
