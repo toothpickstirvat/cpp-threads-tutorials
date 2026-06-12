@@ -450,6 +450,562 @@ wait() → unlock(m) + 挂起 ← 这两步是原子的
 
 addMoney在wait()释放锁之前根本进不来，所以通知永远不会丢失。
 
+## std::lock
+
+在多线程编程中，当多个线程需要同时持有多个互斥锁时，极易发生死锁。
+
+经典的死锁场景：
+
+Thread 1: lock(m1) -> 等待m2
+
+Thread 2: lock(m2) -> 等待m1
+
+两个线程互相等待对方释放锁，程序永久卡住。
+
+死锁的四个必要条件（Coffman条件）：
+
+- 互斥：资源一次只能被一个线程持有
+- 持有并等待：持有一个锁的同时等待另一个
+- 不可剥夺：锁只能由持有者释放
+- 循环等待：形成T1 -> T2 -> T1的等待环
+
+只要打破其中一个条件，就能避免死锁。std::lock破坏的是循环等待。
+
+### 原理
+
+`std::lock(m1, m2, ...)`是C++11引入的原子性多锁获取函数，它保证：要么全部加锁成功，要么全部不持有（无部分加锁的中间态）
+
+内部实现策略（标准未规定具体算法，但常见实现使用以下思路）：
+典型实现是：尝试加锁+回退(try-and-backoff）算法
+
+- 尝试lock(m1)
+- 尝试try_lock(m2)
+    - 成功 -> 全部加锁完成
+    - 失败 -> 释放m1，换一个顺序重试
+- 循环，直到所有锁都拿到
+
+关键点：当部分锁失败时，会释放已持有的所有锁重试，从而打破循环等待链。
+
+### 与std::unique_lock配合使用
+
+直接用`std::lock`有个问题：异常安全。如果加锁后抛异常，需要手动unlock，很容易望。推荐写法是配合`std::unique_lock`的
+`std::adopt_lock`：
+`std::adopt_lock`是一个标记（tag），用来告诉`unique_lock`或`scoped_lock`：这个锁已经被加锁了，你只需要接管它，负责释放就行，不要再加锁一次。
+
+```c++
+void taskA() {
+    std::lock(m1, m2);                              // 先加锁
+    std::unique_lock<std::mutex> lk1(m1, std::adopt_lock);  // 接管，不重新加锁
+    std::unique_lock<std::mutex> lk2(m2, std::adopt_lock);  // 接管，不重新加锁
+    // 函数结束时 lk1, lk2 自动 unlock，异常安全
+}
+```
+
+C++17引入了更简洁的`std::scoped_lock`，一步到位：
+
+```c++
+void taskA() {
+    std::scoped_lock lk(m1, m2);  // 自动多锁 + RAII，推荐！
+    // ...
+}
+```
+
+### 注意事项
+
+- 必须手动unlock：`std::lock`本身不是RAII，加锁后需要手动释放，推荐用`scoped_lock`代替。
+- 多次独立调用会死锁：所有需要同时持有的锁，必须在同一次`std::lock`调用中传入。
+- 性能开销：由于可能多次重试，在高竞争场景下性能不如单锁。
+- 递归锁：`std::lock`不支持`std::recursive_mutex`的递归语义，混用需小心。
+- 只解决多锁死锁：对于单个锁的死锁（如递归加锁、忘记释放）`std::lock`无能为力。
+
+## std::promise和std::future
+
+多线程变成中，线程之间经常需要传递数据。在C++11之前，最常见的做法是：
+
+```c++
+//旧方式：共享变量+mutex+条件变量
+ull result = 0;
+bool ready = false;
+std::mutex mtx;
+std::condition_variable cv;
+
+// 子线程
+{
+    std::lock_guard<std::mutex> lk(mtx);
+    result = compute();
+    ready = true;
+}
+cv.nofity_one();
+
+// 主线程
+std::unique_lock<std::mutex> lk(mtx);
+cv.wait(lk, []{ return ready; });
+// 使用result...
+```
+
+这段代码有几个明显的问题：
+
+- 样板代码多：每次传值都要写一套mutex + condition_variable
+- 容易出错：忘记notify、wait条件写错、虚假唤醒处理
+- 异常无法传递：子线程崩了，主线程毫不知情，死等
+- 语义不清晰：代码意图被同步细节淹没
+
+解决思路：
+C++11引入了更高层的抽象：把“一次性的跨线程传值”封装称一个独立概念。这个概念来自函数式变成和并发理论，叫`Future/Promise`
+模型（最早可追溯到1977年的论文，Scala、Java、JavaScript都有类似实现）。
+
+### 核心原理
+
+#### 共享状态（Shared State）
+
+`promise`和`future`的本质是共享一块内部状态，这块状态由标准库在堆上分配：
+
+```
+┌─────────────┐          ┌──────────────────────────┐         ┌─────────────┐
+│   promise   │──write──▶│  Shared State (堆内存)    │◀──read──│   future    │
+│  (写入端)    │          │  - 值 (T)                │         │  (读取端)    │
+└─────────────┘          │  - 异常指针               │         └─────────────┘
+                         │  - 状态标志 (ready/not)   │
+                         │  - mutex + condition_var │
+                         └──────────────────────────┘
+```
+
+### 状态机
+
+共享状态只有三种状态：
+
+```
+[无值]  ──set_value()──▶  [有值，ready]
+   │
+   └──set_exception()──▶  [有异常，ready]
+
+```
+
+一旦进入`ready`状态，所有阻塞在`future.get()`上的线程都会被唤醒。
+
+### 所有权模型
+
+- promise → 只能 move，不能 copy（独占写入权）
+- future → 只能 move，不能 copy（独占读取权）
+- shared_future → 可以 copy（多个读取端）
+
+### 使用场景
+
+#### 最基础用法
+
+子线程计算，主线程等待结果
+
+```c++
+// 子线程写入
+void worker(std::promise<int>&& p) {
+    p.set_value(42);
+}
+//主线程
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread t(worker, std::move(p));
+int result = f.get(); // 阻塞直到子线程set_value
+t.join();
+```
+
+#### 传递异常
+
+这回`promise/future`相比共享变量最大的优势之一。
+
+```c++
+void worker(std::promise<int>&& p) {
+    try {
+        // 模拟可能失败的操作
+        throw std::runtime_error("计算失败");
+    } catch (...) {
+        p.set_exception(std::current_exception());  // 把异常打包传给主线程
+    }
+}
+
+// 主线程
+try {
+    int result = f.get();  // 如果子线程设置了异常，这里会重新抛出
+} catch (const std::exception& e) {
+    std::cout << "捕获到异常: " << e.what() << std::endl;
+}
+```
+
+子线程的异常被"渡送"到主线程，不再静默消失。
+
+#### 带超时的等待
+
+```c++
+auto status = f.wait_for(std::chrono::seconds(2));
+
+switch (status) {
+    case std::future_status::ready:
+        std::cout << "结果: " << f.get() << std::endl;
+        break;
+    case std::future_status::timeout:
+        std::cout << "超时！" << std::endl;
+        break;
+    case std::future_status::deferred:
+        // std::async 的延迟执行情况
+        break;
+}
+```
+
+#### 一对多广播（shared_future）
+
+一个`future`只能`get()`一次，但是`shared_future`可以被多个线程同时等待
+
+```c++
+
+std::promise<int> p;
+std::shared_future<int> sf = p.get_future().share();
+
+// 可以把sf拷贝给多个线程
+auto t1 = std::thread([sf]{ std::cout << sf.get() << std::endl; });
+auto t2 = std::thread([sf]{ std::cout << sf.get() << std::endl; });
+
+p.set_value(100);  // 同时唤醒t1和t2
+t1.join(); t2.join();
+
+```
+
+#### std::async（promise的上层封装）
+
+大多数时候你需要手写promise，`std::async`自动创建
+
+```c++
+// async内部自动创建promise，函数返回值自动set_value
+std::future<int> f = std::async(std::launch::async, []{
+    return 42;
+});
+int result = f.get();
+```
+
+用`promise`的场合：需要在任意时刻、任意地点（不一定是函数返回时）设置值，比如回调、信号处理、事件驱动。
+
+### 注意事项
+
+#### get()只能调用一次
+
+```c++
+f.get();  // OK
+f.get();  // 抛出 std::future_error: No associated state
+```
+
+第二次调用会抛异常，因为值已经被"取走"了。
+
+#### promise销毁时没有set_value → 异常
+
+````c++
+std::future<int> f;
+{
+    std::promise<int> p;
+    f = p.get_future();
+    // p离开作用域，但没有set_value！
+}
+// 此时f的共享状态被标记为broken_promise
+f.get();  // 抛出 std::future_error: Broken promise
+````
+
+`promise`析构时，如果共享状态还没就绪，会自动设置一个`broken_promise`异常。
+
+#### get()之前线程已经结束不代表值已就绪
+
+子线程可能在`set_value`之前崩溃，这时你会收到`broken_promise`异常，而不是死等。
+
+#### future析构会隐式join（仅std::async创建的情况
+
+```c++
+{
+    auto f = std::async(std::launch::async, []{
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    });
+    // f 离开作用域 → 析构函数会阻塞 5 秒等待线程完成！
+}
+```
+
+这是`std::async`返回的`future`的特殊行为，手动创建的`promise/future`不会这样。
+
+#### promise不能copy，只能move
+
+```c++
+std::promise<int> p1;
+std::promise<int> p2 = p1;         // 编译错误
+std::promise<int> p3 = std::move(p1);  // OK
+```
+
+传给线程时必须用`std::move`，这也是你代码里`std::move(oddSum)`的原因。
+
+### 总结
+
+`promise`是写入端，`future`是读取端，两者共享一块内部状态。
+`promise`在子线程写入值或异常，`future`在主线程阻塞等待并取出——标准库把`mutex`和条件变量的复杂性全部封装在内部，让跨线程的一次性传值变得干净、安全、可传递异常。
+
+## std::async
+
+C++11之前，多线程编程需要手动管理pthread或平台原生线程，代码繁琐且容易出错。C++11 引入了高层异步抽象：
+
+- std::thread → 最底层，手动管理生命周期
+- std::async → 更高层，自动管理线程 + 返回值
+- std::future → 异步结果的"句柄"
+- std::promise → 手动设置异步结果
+
+std::async是"任务式并发"的入口：你描述做什么，而不是怎么管线程。
+
+### 函数签名
+
+```c++
+// 头文件：<future>
+template< class Function, class... Args >
+std::future<std::invoke_result_t<Function, Args...>>
+async( std::launch policy, Function&& f, Args&&... args );
+
+// 也可省略 policy（由实现决定）
+template< class Function, class... Args >
+std::future<...> async( Function&& f, Args&&... args );
+
+```
+
+### launch policy
+
+| Policy                  | 含义    | 何时执行                     |
+|-------------------------|-------|--------------------------|
+| `std::launch::async`    | 立即异步  | 调用`async`时就启动            |
+| `std::launch::deferred` | 延迟执行  | 调用`.get()`或`.wait()`时才执行 |
+| `async\|deferred`       | 由实现决定 | 不确定                      |
+
+代码分析：
+
+```c++
+// 此处不启动线程，只是"登记"了任务
+std::future<ull> oddSum = std::async(std::launch::deferred, findOdd, start, end);
+
+cout << "Waiting for result!!" << endl;
+
+// 直到这里才真正在主线程中执行 findOdd
+cout << "OddSum: " << oddSum.get() << endl;
+```
+
+所以你会看到`findOdd`的`ThreadID`和`main`的`ThreadID`相同。
+
+### 原理
+
+std::async 内部工作流程：
+
+```
+std::async(policy, f, args...)
+          │
+          ├── launch::async
+          │     └─ 创建新线程执行 f(args...)
+          │        线程结果存入 shared state
+          │
+          └── launch::deferred
+                └─ 将 f + args 打包存起来，不执行
+                   当 future.get() 被调用时才执行
+
+future<T>
+ └── 持有 shared state 的指针
+       ├── 结果值（或异常）
+       ├── 状态标志（ready / not-ready）
+       └── 同步原语（mutex/condvar）
+
+.get()
+ └── 阻塞等待 shared state 变为 ready
+     取出结果（只能调用一次！）
+```
+
+### 使用场景
+
+#### 并行计算（async）
+
+```c++
+// 将任务切分，并行执行
+auto f1 = std::async(std::launch::async, findOdd, 0, 500000000);
+auto f2 = std::async(std::launch::async, findOdd, 500000001, 1000000000);
+
+ull result = f1.get() + f2.get();  // 理论上快 2 倍
+```
+
+#### 异步IO/网络请求
+
+```c++
+auto future = std::async(std::launch::async, []() {
+    return fetch_from_network("http://...");
+});
+
+// 主线程做其他工作
+do_other_work();
+
+// 需要结果时再取
+auto data = future.get();
+```
+
+#### 惰性求值（deferred）
+
+```c++
+// 只有真正需要时才计算，避免不必要的开销
+auto result = std::async(std::launch::deferred, expensive_computation, input);
+
+if (need_result) {
+    use(result.get());   // 此时才执行计算
+}
+// 如果不需要，计算永远不会发生
+```
+
+#### 异常传播
+
+```c++
+auto f = std::async(std::launch::async, []() -> int {
+    throw std::runtime_error("出错了");
+    return 42;
+});
+
+try {
+    int val = f.get();   // 异常在这里被重新抛出！
+} catch (const std::exception& e) {
+    // 可以安全捕获异步线程中的异常
+}
+
+```
+
+### 注意事项
+
+#### future析构行为 — 最大陷阱
+
+```c++
+// 危险！async返回的future被立即析构
+std::async(std::launch::async, some_task);  // 析构时会阻塞等待任务完成！
+
+// 正确做法：持有 future
+auto f = std::async(std::launch::async, some_task);
+// ... 做其他事
+f.get();  // 或者让f在作用域末尾析构
+```
+
+`std::async`返回的`future`析构时，如果是`async`策略，会阻塞直到任务完成。这与普通`future`不同。
+
+#### 默认policy不确定
+
+```c++
+// 这行代码可能在新线程执行，也可能在当前线程惰性执行
+// 行为由实现决定，不要依赖它
+auto f = std::async(findOdd, 0, 1000);
+
+// 应该明确指定policy
+auto f = std::async(std::launch::async, findOdd, 0, 1000);
+```
+
+#### .get()只能调用一次
+
+```c++
+auto f = std::async(std::launch::async, []{ return 42; });
+int a = f.get();   // OK
+int b = f.get();   // 抛出std::future_error！
+```
+
+#### async不是线程池
+
+每次`std::launch::async`都可能创建新线程，大量调用会耗尽资源：
+
+```c++
+// 危险：可能创建数千个线程
+for (int i = 0; i < 10000; ++i) {
+    futures.push_back(std::async(std::launch::async, task));
+}
+
+// 生产环境应该用线程池（如Intel TBB、自定义实现）
+```
+
+#### 参数传递是拷贝
+
+```c++
+std::string data = "hello";
+// data 会被拷贝进 async，修改不影响原变量
+auto f = std::async(std::launch::async, [](std::string s){ ... }, data);
+
+// 若需引用，用 std::ref
+auto f = std::async(std::launch::async, func, std::ref(data));
+// 但需确保data的生命周期覆盖future
+```
+
+### 与thread/promise对比
+
+| 对比项  | std::thread     | std::async   | std::promise      |
+|------|-----------------|--------------|-------------------|
+| 返回值  | 需手动             | 自动           | 手动                |
+| 异常传播 | 程序崩溃            | 自动传给`future` | 手动`set_exception` |
+| 生命周期 | 必须`join/detach` | 自动           | 手动                |
+| 灵活性  | 最高              | 中等           | 最高                |
+| 推荐场景 | 长期运行线程          | 一次性任务        | 跨线程通知             |
+
+`std::async` — 自动：你只需要写普通函数，return返回值即可，框架自动把返回值塞进`shared_state`，你不需要写任何`set_value`。
+
+```c++
+ull findOdd(ull start, ull end) {
+    // ...
+    return oddSum;   // 这个返回值被async自动存入future，你不用管
+}
+
+auto f = std::async(std::launch::async, findOdd, 0, 1000);
+f.get();  // 自动拿到oddSum
+
+```
+
+`std::promise` — 手动：没有函数返回值机制，你必须显式调用`set_value`
+
+```c++
+std::promise<int> p;
+std::future<int> f = p.get_future();
+
+std::thread t([&p]() {
+    int result = compute();
+    p.set_value(result);   // 必须手动set，否则f.get()永远阻塞
+});
+
+f.get();
+t.join();
+```
+
+`std::async`的"自动"是指它把函数的return值自动映射为`future`的结果，背后当然有`set_value`，但是框架替你做了，你不用写。
+`std::promise`则是把这个控制权完全交给你。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
